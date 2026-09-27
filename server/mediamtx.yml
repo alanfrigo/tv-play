@@ -1,0 +1,39 @@
+readTimeout: 10s
+authMethod: internal
+authInternalUsers:
+  - user: tvpublisher
+    pass: ""
+    permissions:
+      - action: publish
+        path: tv
+  - user: tvviewer
+    pass: ""
+    permissions:
+      - action: read
+        path: tv
+api: false
+metrics: false
+pprof: false
+playback: false
+rtmp: false
+hls: false
+srt: false
+moq: false
+rtsp: true
+rtspAddress: :8554
+rtspTransports: [tcp]
+rtspEncryption: "no"
+webrtc: true
+webrtcAddress: :8889
+webrtcEncryption: false
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: ""
+webrtcIPsFromInterfaces: false
+webrtcAllowOrigins: []
+webrtcICEServers2: []
+paths:
+  tv:
+    source: publisher
+    overridePublisher: false
+    record: false
+    alwaysAvailable: false

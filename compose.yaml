@@ -1,0 +1,15 @@
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:1.21.1@sha256:5ce2a948eb68df06ce2e13870db8df8e30d516ac4dc40e04bfe8aee3bdf7be40
+    restart: unless-stopped
+    volumes:
+      - ./server/mediamtx.yml:/mediamtx.yml:ro
+    command: /mediamtx.yml
+    ports:
+      - "${NAS_IP:?Defina NAS_IP no .env}:8554:8554/tcp"
+      - "${NAS_IP:?Defina NAS_IP no .env}:8889:8889/tcp"
+      - "${NAS_IP:?Defina NAS_IP no .env}:8189:8189/udp"
+    environment:
+      MTX_WEBRTCADDITIONALHOSTS: ${NAS_IP:?Defina NAS_IP no .env}
+      MTX_AUTHINTERNALUSERS_0_PASS: ${TV_PUBLISH_PASSWORD:?Defina TV_PUBLISH_PASSWORD no .env}
+      MTX_AUTHINTERNALUSERS_1_PASS: ${TV_VIEW_PASSWORD:?Defina TV_VIEW_PASSWORD no .env}

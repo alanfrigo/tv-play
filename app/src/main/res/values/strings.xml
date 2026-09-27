@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Transmissão da TV</string>
+    <string name="nas_ip">IP do NAS</string>
+    <string name="nas_ip_hint">192.168.1.10</string>
+    <string name="publish_password">Senha de transmissão</string>
+    <string name="start">Iniciar transmissão</string>
+    <string name="stop">Parar transmissão</string>
+    <string name="viewer_url">URL de visualização</string>
+    <string name="status_label">Status</string>
+    <string name="capture_warning">Somente apps que permitem captura. Conteúdo protegido pode ficar preto ou sem áudio.</string>
+    <string name="capture_notice">A tela inteira, inclusive notificações, será transmitida a leitores autenticados.</string>
+    <string name="idle">Parado</string>
+    <string name="starting">Iniciando transmissão…</string>
+    <string name="stopping">Encerrando transmissão…</string>
+    <string name="live">Transmitindo</string>
+    <string name="invalid_ip">Informe um IPv4 local privado válido, sem zeros à esquerda.</string>
+    <string name="missing_password">Informe a senha de transmissão.</string>
+    <string name="capture_denied">Captura não autorizada.</string>
+    <string name="capture_unavailable">Captura de tela indisponível nesta TV.</string>
+    <string name="audio_required">Permita a captura de áudio para iniciar.</string>
+    <string name="go_home">Pressione Home e abra o conteúdo desejado.</string>
+</resources>
