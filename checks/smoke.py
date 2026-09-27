@@ -95,6 +95,22 @@ def main():
     assert http_status() == 401, "anonymous HTTP viewer was not rejected"
     assert http_status("tvviewer", view_password + "__wrong") == 401, "bad viewer password was accepted"
     assert http_status("tvviewer", view_password) == 200, "viewer cannot open player"
+    hls_page = f"http://{ip}:8888/tv/"
+    def hls_status(user=None, password=None):
+        headers = {}
+        if user is not None:
+            credentials = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
+            headers["Authorization"] = "Basic " + credentials
+        try:
+            with opener.open(urllib.request.Request(hls_page, headers=headers), timeout=5) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            return error.code
+
+    assert hls_status() == 401, "anonymous HLS viewer was not rejected"
+    assert hls_status("tvviewer", view_password + "__wrong") == 401, "bad HLS password was accepted"
+    assert hls_status("tvviewer", view_password) == 200, "viewer cannot open HLS player"
+    assert hls_status("tvpublisher", publish_password) == 401, "publisher can open HLS player"
     assert http_status("tvpublisher", publish_password) == 401, "publisher can open player"
 
     def rtsp(user, password):
@@ -133,6 +149,13 @@ def main():
             time.sleep(0.5)
 
         decode(viewer_url)
+        hls_url = f"http://tvviewer:{urllib.parse.quote(view_password, safe='')}@{ip}:8888/tv/index.m3u8"
+        hls = subprocess.run(
+            command("ffmpeg", hls_url) + ["-i", hls_url, "-map", "0:v:0", "-map", "0:a:0",
+                                       "-t", "2", "-f", "null", "-"],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
+        )
+        assert hls.returncode == 0, "viewer could not decode HLS video and audio"
         conflict = subprocess.run(
             publisher(publisher_url), stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
         )
@@ -141,7 +164,7 @@ def main():
         decode(viewer_url)
     finally:
         stop(source)
-    print("PASS: HTTP auth, empty-path publish auth, H.264/Opus decode, publisher conflict")
+    print("PASS: HTTP/HLS auth, H.264/Opus RTSP/HLS decode, publisher conflict")
 
 
 if __name__ == "__main__":

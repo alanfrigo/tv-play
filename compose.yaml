@@ -8,6 +8,7 @@ services:
     ports:
       - "${NAS_IP:?Defina NAS_IP no .env}:8554:8554/tcp"
       - "${NAS_IP:?Defina NAS_IP no .env}:8889:8889/tcp"
+      - "${NAS_IP:?Defina NAS_IP no .env}:8888:8888/tcp"
       - "${NAS_IP:?Defina NAS_IP no .env}:8189:8189/udp"
     environment:
       MTX_WEBRTCADDITIONALHOSTS: ${NAS_IP:?Defina NAS_IP no .env}

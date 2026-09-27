@@ -16,7 +16,11 @@ metrics: false
 pprof: false
 playback: false
 rtmp: false
-hls: false
+hls: true
+hlsAddress: :8888
+hlsEncryption: false
+hlsAllowOrigins: []
+hlsVariant: lowLatency
 srt: false
 moq: false
 rtsp: true
