@@ -78,7 +78,6 @@ def main():
     ip = str(ipaddress.IPv4Address(os.environ["NAS_IP"]))
     publish_password = os.environ["TV_PUBLISH_PASSWORD"]
     view_password = os.environ["TV_VIEW_PASSWORD"]
-    assert publish_password != view_password, "publisher and viewer passwords must differ"
     base = f"http://{ip}:8889/tv/"
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 

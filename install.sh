@@ -33,12 +33,8 @@ fi
 if [ ! -e .env ]; then
   [ "$#" -eq 1 ] && [ -n "$1" ] || { echo 'Uso: sh install.sh IP_LAN_DO_SERVIDOR' >&2; exit 1; }
   private_ip "$1" || { echo 'Informe IPv4 privado válido (RFC1918) da interface LAN.' >&2; exit 1; }
-  command -v openssl >/dev/null || { echo 'OpenSSL não encontrado.' >&2; exit 1; }
   umask 077
-  publish_password=$(openssl rand -hex 16)
-  view_password=$(openssl rand -hex 16)
-  printf 'NAS_IP=%s\nTV_PUBLISH_PASSWORD=%s\nTV_VIEW_PASSWORD=%s\n' \
-    "$1" "$publish_password" "$view_password" > .env
+  printf 'NAS_IP=%s\nTV_PUBLISH_PASSWORD=123\nTV_VIEW_PASSWORD=123\n' "$1" > .env
   created=1
 else
   [ -f .env ] || { echo 'Arquivo .env inválido.' >&2; exit 1; }
@@ -53,8 +49,7 @@ docker compose run --rm mediamtx --validate-conf=/mediamtx.yml
 docker compose up -d
 
 if [ "$created" -eq 1 ]; then
-  printf '\nSenha de transmissão (APK, usuário tvpublisher): %s\n' "$publish_password"
-  printf 'Senha de visualização (navegador, usuário tvviewer): %s\n' "$view_password"
+  printf '\nUsuários tvpublisher (APK) e tvviewer (navegador): senha 123.\n'
 else
   printf '\nInstalação existente: .env preservado. Consulte suas credenciais nesse arquivo.\n'
 fi

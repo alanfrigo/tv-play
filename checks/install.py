@@ -47,8 +47,7 @@ with tempfile.TemporaryDirectory(prefix="tvplay-install-") as temp:
     assert first.returncode == 0, first.stderr
     settings = dict(line.split("=", 1) for line in (target / ".env").read_text().splitlines())
     assert settings["NAS_IP"] == "192.168.3.35"
-    assert len(settings["TV_PUBLISH_PASSWORD"]) == len(settings["TV_VIEW_PASSWORD"]) == 32
-    assert settings["TV_PUBLISH_PASSWORD"] != settings["TV_VIEW_PASSWORD"]
+    assert settings["TV_PUBLISH_PASSWORD"] == settings["TV_VIEW_PASSWORD"] == "123"
     assert stat.S_IMODE((target / ".env").stat().st_mode) == 0o600
     assert settings["TV_PUBLISH_PASSWORD"] in first.stdout
     assert settings["TV_VIEW_PASSWORD"] in first.stdout
@@ -59,4 +58,4 @@ with tempfile.TemporaryDirectory(prefix="tvplay-install-") as temp:
     assert settings["TV_PUBLISH_PASSWORD"] not in again.stdout
     assert (target / "starts").read_text().splitlines() == ["started", "started"]
 
-print("PASS: IP privado, senhas distintas, permissões e reinstalação sem troca de credenciais")
+print("PASS: IP privado, senha padrão compartilhada, permissões e reinstalação sem troca de credenciais")

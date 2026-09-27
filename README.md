@@ -10,17 +10,16 @@ Após publicar este código no seu Git, instalar no **servidor Linux** em uma li
 git clone URL_DO_SEU_REPOSITORIO tv-play && cd tv-play && sh install.sh IP_LAN_DO_SERVIDOR
 ```
 
-Requer `git`, Docker Compose v2 e `openssl`. Instalador gera duas senhas fortes distintas, guarda `.env` com permissões restritas e exibe credenciais uma vez para informar no APK e navegador. Ao repetir `sh install.sh` dentro da pasta, preserva `.env`; altere-o manualmente se precisar trocar IP ou senha. Não compartilhe `.env` nem credenciais. Portas 8554/TCP, 8889/TCP e 8189/UDP devem estar livres no IP LAN. Sem TLS: não exponha portas na Internet.
+Requer `git` e Docker Compose v2. Nova instalação usa senha padrão `123` para `tvpublisher` (APK) e `tvviewer` (web); guarda `.env` com permissões restritas. Ao repetir `sh install.sh` dentro da pasta, preserva `.env` existente, inclusive senhas anteriores. Para trocar senhas, edite `.env` e execute `docker compose up -d --force-recreate`. Não compartilhe `.env`. Senha curta e igual nas duas contas facilita teste, **não protege contra outros dispositivos na LAN**. Portas 8554/TCP, 8889/TCP e 8189/UDP devem ficar livres no IP LAN. Sem TLS: nunca exponha portas na Internet.
 
 Requer NAS Linux com Docker Compose v2, IP IPv4 LAN reservado no DHCP e portas TCP 8554/8889 e UDP 8189 liberadas **somente na LAN confiável**. Na raiz do projeto:
 
 ```sh
 cp .env.example .env
-openssl rand -hex 16   # senha independente de publicação; copiar para .env
-openssl rand -hex 16   # senha independente de visualização; copiar para .env
+# preencher NAS_IP no .env; senhas de teste já vêm como 123
 ```
 
-Preencher `NAS_IP` com IPv4 real do NAS, `TV_PUBLISH_PASSWORD` e `TV_VIEW_PASSWORD` com senhas distintas no `.env` (ignorado pelo Git). Não deixar valores vazios. Não expor portas no roteador: HTTP Basic e RTSP aqui **não usam TLS**; tráfego e credenciais podem ser observados na LAN. Rede não confiável exige HTTPS/RTSPS antes de exposição.
+Preencher `NAS_IP` com IPv4 real do NAS. `.env` é ignorado pelo Git. Não abrir portas no roteador: HTTP Basic e RTSP aqui **não usam TLS**; tráfego e credenciais podem ser observados na LAN. Rede não confiável exige HTTPS/RTSPS antes de exposição.
 
 ```sh
 docker compose config --quiet
