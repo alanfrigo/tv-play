@@ -252,7 +252,8 @@ class MainActivity : Activity() {
         stopButton.isEnabled = startingService || serviceState == CaptureService.State.STARTING ||
             serviceState == CaptureService.State.LIVE
         statusView.text = when {
-            pending || serviceState == CaptureService.State.STARTING -> getString(R.string.starting)
+            pending -> getString(R.string.starting)
+            serviceState == CaptureService.State.STARTING -> serviceMessage.ifEmpty { getString(R.string.starting) }
             serviceState == CaptureService.State.STOPPING -> getString(R.string.stopping)
             serviceState == CaptureService.State.LIVE -> {
                 "${serviceMessage.ifEmpty { getString(R.string.live) }}\n${getString(R.string.go_home)}"

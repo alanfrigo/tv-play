@@ -21,44 +21,86 @@ def command(program, url):
     return [program, "-hide_banner", "-loglevel", "error", "-nostdin"]
 
 
-def publisher(url):
+def publisher(url, size="1280x720", bitrate="2M"):
     return command("ffmpeg", url) + [
-        "-re", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30",
+        "-re", "-f", "lavfi", "-i", f"testsrc2=size={size}:rate=30",
         "-re", "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "baseline",
         "-preset", "ultrafast", "-tune", "zerolatency", "-bf", "0",
-        "-g", "30", "-b:v", "2M", "-c:a", "libopus", "-ar", "48000",
-        "-ac", "2", "-b:a", "96k", "-f", "rtsp", "-rtsp_transport", "tcp",
-        "-rw_timeout", "5000000", url,
+        "-g", "30", "-b:v", bitrate, "-minrate", bitrate,
+        "-maxrate", bitrate, "-bufsize", bitrate, "-x264-params", "nal-hrd=cbr",
+        "-c:a", "libopus", "-ar", "48000", "-ac", "2", "-b:a", "96k",
+        "-f", "rtsp", "-rtsp_transport", "tcp", "-rw_timeout", "5000000", url,
     ]
 
 
 def probe(url):
     return subprocess.run(
         ["ffprobe", "-v", "error", "-rtsp_transport", "tcp",
-         "-rw_timeout", "5000000", "-show_entries", "stream=codec_name,codec_type",
+         "-rw_timeout", "5000000", "-show_entries", "stream=codec_name,codec_type,width,height",
          "-of", "json", url],
         stdin=subprocess.DEVNULL, capture_output=True, timeout=12,
     )
 
 
-def decode(url):
+def decode(url, size, seconds, rtsp=True):
+    input_options = ["-rtsp_transport", "tcp"] if rtsp else []
     result = subprocess.run(
-        command("ffmpeg", url) + [
-            "-rtsp_transport", "tcp", "-i", url,
-            "-map", "0:v:0", "-map", "0:a:0", "-t", "2",
-            "-c:v", "rawvideo", "-c:a", "pcm_s16le", "-f", "framemd5", "-",
+        command("ffmpeg", url) + input_options + [
+            "-i", url, "-map", "0:v:0", "-map", "0:a:0", "-t", str(seconds),
+            "-fps_mode", "passthrough", "-c:v", "rawvideo", "-c:a", "pcm_s16le",
+            "-f", "framemd5", "-",
         ],
-        stdin=subprocess.DEVNULL, capture_output=True, timeout=16,
+        stdin=subprocess.DEVNULL, capture_output=True, timeout=seconds + 18,
     )
-    assert result.returncode == 0, "viewer could not decode both media streams"
-    counts = {"0": 0, "1": 0}
-    for line in result.stdout.decode("ascii", errors="replace").splitlines():
-        if not line.startswith("#"):
-            fields = line.split(",", 1)
-            if len(fields) == 2 and fields[0].strip() in counts:
-                counts[fields[0].strip()] += 1
-    assert all(counts.values()), "viewer decoded no video frames or audio samples"
+    assert result.returncode == 0, (
+        f"viewer could not decode {size} {'RTSP' if rtsp else 'HLS'}: "
+        + result.stderr.decode(errors="replace").replace(url, "[stream URL]")[-500:]
+    )
+    lines = result.stdout.decode("ascii", errors="replace").splitlines()
+    assert f"#dimensions 0: {size}" in lines, "viewer decoded wrong video dimensions"
+    timebase = next((line.split(": ", 1)[1] for line in lines if line.startswith("#tb 0: ")), None)
+    assert timebase, "viewer returned no video timebase"
+    numerator, denominator = map(int, timebase.split("/"))
+    frames = []
+    audio = 0
+    for line in lines:
+        if line.startswith("#"):
+            continue
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) < 6:
+            continue
+        if fields[0] == "0":
+            frames.append((int(fields[1]) * numerator / denominator, fields[5]))
+        elif fields[0] == "1":
+            audio += 1
+    assert audio and len(frames) >= 30 * (seconds - 1), "viewer lost video frames or audio"
+    timestamps = [frame[0] for frame in frames]
+    gaps = [after - before for before, after in zip(timestamps, timestamps[1:])]
+    assert all(0.02 <= gap <= 0.1 for gap in gaps), (
+        f"{size} {'RTSP' if rtsp else 'HLS'} video gap out of range: "
+        f"min={min(gaps):.3f}s max={max(gaps):.3f}s"
+    )
+    assert timestamps[-1] - timestamps[0] >= seconds - 1, "viewer video stopped early"
+    assert len({frame[1] for frame in frames}) >= len(frames) * 0.9, "viewer video froze"
+
+
+def video_bitrate(url):
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-rw_timeout", "5000000",
+         "-rtsp_transport", "tcp", "-read_intervals", "%+5",
+         "-select_streams", "v:0", "-show_packets",
+         "-show_entries", "packet=size", "-of", "json", url],
+        stdin=subprocess.DEVNULL, capture_output=True, timeout=22,
+    )
+    assert result.returncode == 0, "viewer could not inspect received video packets"
+    packets = json.loads(result.stdout)["packets"]
+    assert len(packets) >= 120, "viewer received too few compressed frames"
+    # One H.264 access unit per demuxed packet; 30 fps source sets sample duration.
+    bitrate = 8 * sum(int(packet["size"]) for packet in packets) * 30 / len(packets)
+    assert 3_000_000 <= bitrate <= 5_000_000, (
+        f"received video bitrate outside 4 Mbps range: {bitrate / 1e6:.2f} Mbps"
+    )
 
 
 def stop(process):
@@ -131,40 +173,51 @@ def main():
         "viewer publish was not explicitly denied by RTSP authorization"
     )
 
-    source = subprocess.Popen(publisher(publisher_url), stdin=subprocess.DEVNULL,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        deadline = time.monotonic() + 35
-        while True:
-            assert source.poll() is None, "synthetic publisher stopped before media became readable"
-            media = probe(viewer_url)
-            if media.returncode == 0:
-                streams = json.loads(media.stdout)["streams"]
-                codecs = {(stream["codec_type"], stream["codec_name"]) for stream in streams}
-                assert ("video", "h264") in codecs and ("audio", "opus") in codecs, (
-                    "viewer sees wrong codecs; expected H.264 and Opus"
-                )
-                break
-            assert time.monotonic() < deadline, "synthetic publisher never became readable"
-            time.sleep(0.5)
+    hls_url = f"http://tvviewer:{urllib.parse.quote(view_password, safe='')}@{ip}:8888/tv/index.m3u8"
+    for size, bitrate in (("1280x720", "2M"), ("1920x1080", "4M")):
+        source = subprocess.Popen(publisher(publisher_url, size, bitrate), stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 20
+            while True:
+                assert source.poll() is None, "synthetic publisher stopped before media became readable"
+                media = probe(viewer_url)
+                if media.returncode == 0:
+                    streams = json.loads(media.stdout)["streams"]
+                    codecs = {(stream["codec_type"], stream["codec_name"]) for stream in streams}
+                    assert ("video", "h264") in codecs and ("audio", "opus") in codecs, (
+                        "viewer sees wrong codecs; expected H.264 and Opus"
+                    )
+                    assert any(stream.get("width") == int(size.split("x")[0]) and
+                               stream.get("height") == int(size.split("x")[1]) for stream in streams), (
+                        "viewer sees wrong published video resolution"
+                    )
+                    break
+                assert time.monotonic() < deadline, "synthetic publisher never became readable"
+                time.sleep(0.5)
 
-        decode(viewer_url)
-        hls_url = f"http://tvviewer:{urllib.parse.quote(view_password, safe='')}@{ip}:8888/tv/index.m3u8"
-        hls = subprocess.run(
-            command("ffmpeg", hls_url) + ["-i", hls_url, "-map", "0:v:0", "-map", "0:a:0",
-                                       "-t", "2", "-f", "null", "-"],
-            stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
-        )
-        assert hls.returncode == 0, "viewer could not decode HLS video and audio"
-        conflict = subprocess.run(
-            publisher(publisher_url), stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
-        )
-        assert conflict.returncode != 0, "second publisher was not rejected"
-        assert source.poll() is None, "first publisher stopped after conflict"
-        decode(viewer_url)
-    finally:
-        stop(source)
-    print("PASS: HTTP/HLS auth, H.264/Opus RTSP/HLS decode, publisher conflict")
+            if size == "1920x1080":
+                video_bitrate(viewer_url)
+            decode(viewer_url, size, 5)
+            decode(hls_url, size, 5, rtsp=False)
+            conflict = subprocess.run(
+                publisher(publisher_url, size, bitrate), stdin=subprocess.DEVNULL,
+                capture_output=True, timeout=15,
+            )
+            assert conflict.returncode != 0, "second publisher was not rejected"
+            assert source.poll() is None, "first publisher stopped after conflict"
+            decode(viewer_url, size, 3)
+        finally:
+            stop(source)
+
+        deadline = time.monotonic() + 12
+        while True:
+            empty = probe(viewer_url)
+            if empty.returncode != 0 and re.search(rb"\b404\b", empty.stderr):
+                break
+            assert time.monotonic() < deadline, "source stayed present after publisher stopped"
+            time.sleep(0.5)
+    print("PASS: auth, 720p/1080p30 RTSP/HLS frames, received 4 Mbps, conflict, publisher restart")
 
 
 if __name__ == "__main__":

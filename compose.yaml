@@ -10,6 +10,7 @@ services:
       - "${NAS_IP:?Defina NAS_IP no .env}:8889:8889/tcp"
       - "${NAS_IP:?Defina NAS_IP no .env}:8888:8888/tcp"
       - "${NAS_IP:?Defina NAS_IP no .env}:8189:8189/udp"
+      - "${NAS_IP:?Defina NAS_IP no .env}:8189:8189/tcp"
     environment:
       MTX_WEBRTCADDITIONALHOSTS: ${NAS_IP:?Defina NAS_IP no .env}
       MTX_AUTHINTERNALUSERS_0_PASS: ${TV_PUBLISH_PASSWORD:?Defina TV_PUBLISH_PASSWORD no .env}

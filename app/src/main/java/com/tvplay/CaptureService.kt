@@ -21,6 +21,7 @@ import android.util.Log
 import com.pedro.common.AudioCodec
 import com.pedro.common.ConnectChecker
 import com.pedro.common.VideoCodec
+import com.pedro.common.socket.base.SocketType
 import com.pedro.encoder.CodecErrorCallback
 import com.pedro.encoder.input.sources.MediaProjectionHandler
 import com.pedro.encoder.input.sources.video.ScreenSource
@@ -41,10 +42,18 @@ class CaptureService : Service() {
         var callback: MediaProjection.Callback? = null
         var networkStarted = false
         var networkDisconnected = false
+        var retryPending = false
         var failed = false
         var terminalMessage = "Transmissão encerrada."
-        var initialWidth = 0
-        var initialHeight = 0
+        var videoBitrate = 0
+        var maxVideoBitrate = 0
+        var clearSamples = 0
+        var fpsClearSamples = 0
+        var droppedFrames = 0L
+        var videoFps = 30
+        var sentBytes = 0L
+        var sampleTime = 0L
+        var stalledSamples = 0
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -58,6 +67,8 @@ class CaptureService : Service() {
     private var session: Session? = null
     private var foreground = false
     private var disconnectTimeout: Runnable? = null
+    private var qualityCheck: Runnable? = null
+    private var connectTimeout: Runnable? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -148,18 +159,6 @@ class CaptureService : Service() {
                         }
                     }
                 }
-
-                override fun onCapturedContentResize(width: Int, height: Int) {
-                    runOnMain {
-                        if (session?.id != current.id || state == State.STOPPING) return@runOnMain
-                        if (current.initialWidth == 0 && current.initialHeight == 0) {
-                            current.initialWidth = width
-                            current.initialHeight = height
-                        } else if (current.initialWidth != width || current.initialHeight != height) {
-                            stopCapture("A tela mudou. Inicie a transmissão novamente.", true)
-                        }
-                    }
-                }
             }
             current.callback = callback
             projection.registerCallback(callback, handler)
@@ -174,12 +173,14 @@ class CaptureService : Service() {
             stream.setVideoCodec(VideoCodec.H264)
             stream.setAudioCodec(AudioCodec.OPUS)
             stream.forceCodecType(CodecUtil.CodecType.HARDWARE, CodecUtil.CodecType.FIRST_COMPATIBLE_FOUND)
-            (stream.getStreamClient() as com.pedro.library.util.streamclient.RtspStreamClient).apply {
+            val client = stream.getStreamClient() as com.pedro.library.util.streamclient.RtspStreamClient
+            client.apply {
                 setProtocol(Protocol.TCP)
+                setSocketType(SocketType.KTOR)
                 setAuthorization("tvpublisher", password)
                 setLogs(false)
-                setReTries(0)
-                setSocketTimeout(5_000L)
+                setReTries(7)
+                setSocketTimeout(10_000L)
             }
             stream.setEncoderErrorCallback(object : CodecErrorCallback {
                 override fun onCodecError(type: CodecUtil.CodecTypeError, e: MediaCodec.CodecException) {
@@ -191,16 +192,37 @@ class CaptureService : Service() {
                     return false
                 }
             })
+            // WebRTC browsers reject H.264 B-frames; Baseline keeps direct playback compatible.
             val videoReady = try {
                 stream.prepareVideo(
-                    1280, 720, 2_000_000, fps = 30, iFrameInterval = 1,
-                    rotation = 0, profile = MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+                    1920, 1080, 4_000_000, fps = 30, iFrameInterval = 1,
+                    profile = MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
                 )
             } catch (error: Exception) {
-                logCleanup("Video prepare", error)
+                logCleanup("1080p prepare", error)
                 false
             }
-            if (!videoReady) {
+            val prepared = if (videoReady) {
+                current.videoBitrate = 4_000_000
+                current.maxVideoBitrate = 4_000_000
+                true
+            } else {
+                try {
+                    stream.prepareVideo(
+                        1280, 720, 2_000_000, fps = 30, iFrameInterval = 1,
+                        profile = MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+                    ).also {
+                        if (it) {
+                            current.videoBitrate = 2_000_000
+                            current.maxVideoBitrate = 2_000_000
+                        }
+                    }
+                } catch (error: Exception) {
+                    logCleanup("720p prepare", error)
+                    false
+                }
+            }
+            if (!prepared) {
                 stopCapture("Esta TV não oferece codificação H.264 compatível.", true)
                 return
             }
@@ -220,6 +242,7 @@ class CaptureService : Service() {
             stream.getGlInterface().setForceRender(true, 30)
             // startStream starts RTSP before sources: synchronous source failure still needs teardown.
             current.networkStarted = true
+            watchConnection(current)
             stream.startStream("rtsp://$ip:8554/tv")
         } catch (error: Exception) {
             logCleanup("Capture start", error)
@@ -236,21 +259,47 @@ class CaptureService : Service() {
     }
 
     private fun checker(current: Session) = object : ConnectChecker {
-        override fun onConnectionStarted(url: String) = Unit
+        override fun onConnectionStarted(url: String) {
+            runOnMain {
+                if (session?.id != current.id || state != State.STARTING) return@runOnMain
+                current.retryPending = false
+                watchConnection(current)
+            }
+        }
         override fun onConnectionSuccess() {
             runOnMain {
-                if (session?.id == current.id && state == State.STARTING) publish(State.LIVE, "Transmitindo")
+                if (session?.id == current.id && state == State.STARTING) {
+                    connectTimeout?.let(handler::removeCallbacks)
+                    connectTimeout = null
+                    current.stream?.requestKeyframe()
+                    publish(State.LIVE, "Transmitindo")
+                    monitorQuality(current)
+                }
             }
         }
         override fun onConnectionFailed(reason: String) {
-            connectionLost(current)
+            runOnMain {
+                if (session?.id != current.id || state == State.STOPPING || current.retryPending) return@runOnMain
+                val client = current.stream?.getStreamClient() ?: return@runOnMain
+                if (!reason.contains("access denied", ignoreCase = true) && client.reTry(2_000L, reason)) {
+                    current.retryPending = true
+                    qualityCheck?.let(handler::removeCallbacks)
+                    qualityCheck = null
+                    publish(State.STARTING, "Reconectando ao NAS")
+                    watchConnection(current)
+                } else {
+                    stopCapture("Conexão com o NAS encerrada. Verifique rede, endereço e se já existe outra transmissão.", true)
+                }
+            }
         }
         override fun onDisconnect() {
             runOnMain {
                 if (session?.id != current.id) return@runOnMain
                 current.networkDisconnected = true
                 if (state == State.STOPPING) finishStop(current)
-                else if (state == State.STARTING || state == State.LIVE) connectionLost(current)
+                else if (state == State.STARTING || state == State.LIVE) {
+                    stopCapture("Conexão com o NAS encerrada.", true)
+                }
             }
         }
         override fun onAuthError() {
@@ -263,19 +312,108 @@ class CaptureService : Service() {
         override fun onAuthSuccess() = Unit
     }
 
-    private fun connectionLost(current: Session) {
-        runOnMain {
-            if (session?.id == current.id && state != State.STOPPING) {
-                stopCapture(
-                    "Conexão com o NAS encerrada. Verifique rede, endereço e se já existe outra transmissão.",
-                    true
-                )
+    private fun watchConnection(current: Session) {
+        connectTimeout?.let(handler::removeCallbacks)
+        val timeout = Runnable {
+            if (session?.id == current.id && state == State.STARTING) {
+                stopCapture("Tempo limite para conectar ao NAS. Inicie novamente.", true)
             }
         }
+        connectTimeout = timeout
+        handler.postDelayed(timeout, 20_000L)
+    }
+
+    private fun monitorQuality(current: Session) {
+        val client = current.stream?.getStreamClient() ?: return
+        current.sentBytes = client.getBytesSend()
+        current.sampleTime = android.os.SystemClock.elapsedRealtime()
+        current.droppedFrames = client.getDroppedVideoFrames()
+        current.clearSamples = 0
+        current.fpsClearSamples = 0
+        current.stalledSamples = 0
+        val check = object : Runnable {
+            override fun run() {
+                if (session?.id != current.id || state != State.LIVE) return
+                val stream = current.stream ?: return
+                val client = stream.getStreamClient()
+                val now = android.os.SystemClock.elapsedRealtime()
+                val bytes = client.getBytesSend()
+                val elapsed = now - current.sampleTime
+                val sent = bytes - current.sentBytes
+                current.sampleTime = now
+                current.sentBytes = bytes
+                val bitrate = if (elapsed > 0 && sent >= 0) sent * 8_000L / elapsed else 0L
+                val limit = current.maxVideoBitrate * 11L / 10L // áudio e overhead RTSP
+                val dropped = client.getDroppedVideoFrames()
+                val congested = client.hasCongestion(10f) || dropped > current.droppedFrames
+                // ponytail: Ktor não limita escrita NIO; progresso + fila detectam bloqueio real.
+                current.stalledSamples = if (sent <= 0 && client.hasCongestion(10f))
+                    current.stalledSamples + 1 else 0
+                if (current.stalledSamples >= 5) {
+                    checker(current).onConnectionFailed("RTSP sem progresso de envio")
+                    return
+                }
+                current.droppedFrames = dropped
+                if (congested) {
+                    current.clearSamples = 0
+                    val target = maxOf(current.videoBitrate * 3 / 4, 2_000_000)
+                    if (target < current.videoBitrate) {
+                        current.videoBitrate = target
+                        stream.setVideoBitrateOnFly(target)
+                    }
+                    if (sent > 0 && client.hasCongestion(50f)) {
+                        client.clearCache()
+                        stream.requestKeyframe()
+                    }
+                } else if (++current.clearSamples >= 3) {
+                    current.clearSamples = 0
+                    val target = minOf(current.videoBitrate + 500_000, current.maxVideoBitrate)
+                    if (target > current.videoBitrate) {
+                        current.videoBitrate = target
+                        stream.setVideoBitrateOnFly(target)
+                    }
+                }
+                // ponytail: encoder da TV pode ignorar bitrate; limitar quadros, sem trocar resolução em sessão ativa.
+                val fps = when {
+                    congested -> {
+                        current.fpsClearSamples = 0
+                        maxOf(current.videoFps * 3 / 4, 5)
+                    }
+                    bitrate > limit -> {
+                        current.fpsClearSamples = 0
+                        maxOf((current.videoFps * limit / bitrate).toInt(), 5)
+                    }
+                    bitrate > 0 && current.videoFps < 30 &&
+                        bitrate * (current.videoFps + 1) <= limit * current.videoFps * 19 / 20 -> {
+                        if (++current.fpsClearSamples >= 2) {
+                            current.fpsClearSamples = 0
+                            val step = if (bitrate * (current.videoFps + 3) <=
+                                limit * current.videoFps * 19 / 20) 3 else 1
+                            minOf(current.videoFps + step, 30)
+                        } else current.videoFps
+                    }
+                    else -> {
+                        current.fpsClearSamples = 0
+                        current.videoFps
+                    }
+                }
+                if (fps != current.videoFps) {
+                    current.videoFps = fps
+                    stream.getGlInterface().forceFpsLimit(fps)
+                }
+                handler.postDelayed(this, 2_000L)
+            }
+        }
+        qualityCheck = check
+        handler.postDelayed(check, 2_000L)
     }
 
     private fun stopCapture(terminalMessage: String, failed: Boolean) {
         val current = session ?: return
+        connectTimeout?.let(handler::removeCallbacks)
+        connectTimeout = null
+        qualityCheck?.let(handler::removeCallbacks)
+        qualityCheck = null
         if (state == State.STOPPING) return
         current.terminalMessage = terminalMessage
         current.failed = failed
@@ -292,8 +430,9 @@ class CaptureService : Service() {
             val timeout = Runnable {
                 if (session?.id == current.id && state == State.STOPPING) {
                     current.failed = true
-                    current.terminalMessage =
-                        "Encerramento de rede incompleto. Aguarde 10 segundos antes de tentar novamente."
+                    if (current.terminalMessage == "Transmissão encerrada.") {
+                        current.terminalMessage = "Encerramento de rede incompleto. Aguarde 10 segundos antes de tentar novamente."
+                    }
                     finishStop(current)
                 }
             }
@@ -354,6 +493,10 @@ class CaptureService : Service() {
     private fun finishStop(current: Session) {
         if (session?.id != current.id) return
         disconnectTimeout?.let(handler::removeCallbacks)
+        connectTimeout?.let(handler::removeCallbacks)
+        connectTimeout = null
+        qualityCheck?.let(handler::removeCallbacks)
+        qualityCheck = null
         disconnectTimeout = null
         session = null
         settings.edit().putString("terminal_message", current.terminalMessage).apply()
@@ -396,6 +539,10 @@ class CaptureService : Service() {
     }
 
     override fun onDestroy() {
+        qualityCheck?.let(handler::removeCallbacks)
+        connectTimeout?.let(handler::removeCallbacks)
+        connectTimeout = null
+        qualityCheck = null
         disconnectTimeout?.let(handler::removeCallbacks)
         disconnectTimeout = null
         session?.let { current ->

@@ -31,7 +31,7 @@ webrtc: true
 webrtcAddress: :8889
 webrtcEncryption: false
 webrtcLocalUDPAddress: :8189
-webrtcLocalTCPAddress: ""
+webrtcLocalTCPAddress: :8189
 webrtcIPsFromInterfaces: false
 webrtcAllowOrigins: []
 webrtcICEServers2: []

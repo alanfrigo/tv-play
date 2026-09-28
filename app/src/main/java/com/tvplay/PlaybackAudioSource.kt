@@ -75,10 +75,8 @@ class PlaybackAudioSource(
     }
 
     private fun readLoop(audio: AudioRecord) {
+        var buffer = ByteArray(3_840)
         while (running) {
-            // Encoder queues Frames asynchronously; each delivered buffer must remain its own.
-            val buffer = ByteArray(3_840)
-            val timestamp = TimeUtils.getCurrentTimeMicro()
             val count = try {
                 audio.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
             } catch (error: Exception) {
@@ -86,11 +84,28 @@ class PlaybackAudioSource(
                 -1
             }
             if (!running) return
-            if (count <= 0) break
+            if (count == 0) {
+                try {
+                    Thread.sleep(10)
+                } catch (error: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    if (!running) return
+                    break
+                }
+                continue
+            }
+            if (count < 0) break
+            // read() blocks; returned PCM began count / 192_000 seconds before this clock sample.
+            // 3_840 bytes of 48 kHz stereo 16-bit PCM span 20 ms, not 10 ms.
+            val timestamp = TimeUtils.getCurrentTimeMicro() - count * 1_000_000L / 192_000L
             try {
                 synchronized(this) {
                     if (!running) return
-                    getMicrophoneData?.inputPCMData(Frame(buffer, 0, count, timestamp))
+                    getMicrophoneData?.let { microphone ->
+                        // Frames queue asynchronously: never overwrite a delivered buffer.
+                        microphone.inputPCMData(Frame(buffer, 0, count, timestamp))
+                        buffer = ByteArray(3_840)
+                    }
                 }
             } catch (error: Exception) {
                 Log.w(TAG, "Audio delivery: ${error.javaClass.simpleName}")
